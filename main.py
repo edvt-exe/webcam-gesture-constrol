@@ -24,10 +24,14 @@ SWIPE_FRAMES = 10
 VOL_MOVE_THRESH = 0.04
 OK_DIST_THRESH = 0.05
 
+FIST_TO_PALM_WINDOW = 0.6
+
 class HandState:
     def __init__(self):
         self.wrist_x_hist = collections.deque(maxlen=SWIPE_FRAMES)
         self.index_y_hist = collections.deque(maxlen=5)
+        self.was_fist = False
+        self.fist_time = 0.0
         self.last_action_time = 0.0
 
 def is_open_palm(up):
@@ -41,6 +45,20 @@ def is_ok_sign(lm):
 
 def is_pointing_up(up):
     return up[1] and not any(up[2:])
+
+def is_victory(up):
+    return up[1] and up[2] and not up[3] and not up[4]
+
+def palm_covers_face(lm):
+    xs = [p.x for p in lm]
+    ys = [p.y for p in lm]
+    w_norm = max(xs) - min(xs)
+    h_norm = max(ys) - min(ys)
+    cx = (max(xs) + min(xs)) / 2
+    return w_norm > 0.45 and h_norm > 0.45 and 0.25 < cx < 0.75
+
+def is_fist(up):
+    return sum(up) == 0
 
 def draw_hud(frame, gesture, finger_count):
     cv2.rectangle(frame, (0, 0), (260, 70), (20, 20, 20), -1)
@@ -68,11 +86,12 @@ def main():
 
     with mp_hands.Hands(model_complexity=0, max_num_hands=2,min_detection_confidence=0.6, min_tracking_confidence=0.5) as hands:
         while cap.isOpened():
-            ok, freame = cap.read()
+            ok, frame = cap.read()
             if not ok:
                 break
+            frame = cv2.flip(frame, 1)
 
-            frame = cv2.flip(freame, 1)
+            frame = cv2.flip(frame, 1)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = hands.process(rgb)
 
@@ -100,10 +119,52 @@ def main():
 
                     can_fire = (now - st.last_action_time) > COOLDOWN
 
-                    # Raise 1-5 fingers => switch to tab N
-                    if 1 <= fcount <= 5 and can_fire:
-                        pyautogui.hotkey('ctrl', str(fcount))
-                        gesture_label = f"Switch to Tab {fcount}"
+                    # Fist -> open palm quick transition => Fullscreen toggle
+                    if is_fist(up):
+                        st.was_fist = True
+                        st.fist_time = now
+                    elif (gesture_label == "None" and is_open_palm(up) and st.was_fist
+                          and (now - st.fist_time) < FIST_TO_PALM_WINDOW and can_fire):
+                        pyautogui.press('f11')
+                        gesture_label = "Fullscreen Toggle"
+                        st.last_action_time = now
+                        st.was_fist = False
+
+                    # OK sign => Play/Pause
+                    if gesture_label == "None" and is_ok_sign(lm) and can_fire:
+                        pyautogui.press('space')
+                        gesture_label = "Play/Pause"
+                        st.last_action_time = now
+
+                    # Palm covering face => Show Desktop
+                    if gesture_label == "None" and palm_covers_face(lm) and can_fire:
+                        pyautogui.hotkey('win', 'd')
+                        gesture_label = "Show Desktop"
+                        st.last_action_time = now
+
+                    # Victory sign => Screenshot
+                    if gesture_label == "None" and is_victory(up) and can_fire:
+                        pyautogui.hotkey('win', 'shift', 's')
+                        gesture_label = "Screenshot"
+                        st.last_action_time = now
+
+                    # Pointing finger vertical move => Volume up/down
+                    if (gesture_label == "None" and is_pointing_up(up)
+                            and len(st.index_y_hist) == st.index_y_hist.maxlen and can_fire):
+                        dy = st.index_y_hist[0] - st.index_y_hist[-1]
+                        if abs(dy) > VOL_MOVE_THRESH:
+                            if dy > 0:
+                                pyautogui.press('volumeup')
+                                gesture_label = "Volume Up"
+                            else:
+                                pyautogui.press('volumedown')
+                                gesture_label = "Volume Down"
+                            st.last_action_time = now
+
+                    # Left hand open palm => Mute
+                    if gesture_label == "None" and label == "Left" and is_open_palm(up) and can_fire:
+                        pyautogui.press('volumemute')
+                        gesture_label = "Mute Toggle"
                         st.last_action_time = now
 
                     # Swipe left/right with open palm => Alt+Tab
@@ -116,30 +177,11 @@ def main():
                             st.last_action_time = now
                             st.wrist_x_hist.clear()
 
-                    # OK sign -> Play/Pause
-                    if gesture_label == "None" and is_ok_sign(lm) and can_fire:
-                        pyautogui.press('space')
-                        gesture_label = "Play/Pause"
+                    # Raise 1-5 fingers => switch to tab N (fallback, lowest priority)
+                    if gesture_label == "None" and 1 <= fcount <= 5 and can_fire:
+                        pyautogui.hotkey('ctrl', str(fcount))
+                        gesture_label = f"Switch to Tab {fcount}"
                         st.last_action_time = now
-
-                    # Left hand open palm -> Mute
-                    if gesture_label == "None" and label == "Left" and is_open_palm(up) and can_fire:
-                        pyautogui.press('volumemute')
-                        gesture_label = "Mute Toggle"
-                        st.last_action_time = now
-
-                    # Pointing finger vertical move -> Volume up/down
-                    if (gesture_label == "None" and is_pointing_up(up)
-                            and len(st.index_y_hist) == st.index_y_hist.maxlen and can_fire):
-                        dy = st.index_y_hist[0] - st.index_y_hist[-1]
-                        if abs(dy) > VOL_MOVE_THRESH:
-                            if dy > 0:
-                                pyautogui.press('volumeup')
-                                gesture_label = "Volume Up"
-                            else:
-                                pyautogui.press('volumedown')
-                                gesture_label = "Volume Down"
-                            st.last_action_time = now
 
             draw_hud(frame, gesture_label, finger_count)
             cv2.imshow("Gesture PC Control", frame)
