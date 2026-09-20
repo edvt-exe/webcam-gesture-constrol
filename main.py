@@ -25,11 +25,13 @@ VOL_MOVE_THRESH = 0.04
 OK_DIST_THRESH = 0.05
 
 FIST_TO_PALM_WINDOW = 0.6
+SCROLL_SENSITIVITY = 400
 
 class HandState:
     def __init__(self):
         self.wrist_x_hist = collections.deque(maxlen=SWIPE_FRAMES)
         self.index_y_hist = collections.deque(maxlen=5)
+        self.index_pos_hist = collections.deque(maxlen=8)
         self.was_fist = False
         self.fist_time = 0.0
         self.last_action_time = 0.0
@@ -77,6 +79,33 @@ def fingers_up(lm, handedness):
         up.append(lm[tip].y < lm[pip].y)  
     return up
 
+def circular_motion(pos_hist):
+    # Detect circular index finger motion and returns +1, -1 or 0
+    if len(pos_hist) < pos_hist.maxlen:
+        return 0
+    xs = [p[0] for p in pos_hist]
+    ys = [p[1] for p in pos_hist]
+    cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+    angles = [math.atan2(y - cy, x - cx) for x, y in pos_hist]
+
+    total = 0
+    for i in range(1, len(angles)):
+        d = angles[i] - angles[i - 1]
+        while d > math.pi:
+            d -= 2 * math.pi
+        while d < -math.pi:
+            d += 2 * math.pi
+        total += d
+
+    radius = math.hypot(xs[0] - cx, ys[0] - cy)
+    if radius < 0.03:
+        return 0
+    if total > 2.5:
+        return 1
+    if total < -2.5:
+        return -1
+    return 0
+
 def main():
     cap = cv2.VideoCapture(CAM_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
@@ -91,7 +120,6 @@ def main():
                 break
             frame = cv2.flip(frame, 1)
 
-            frame = cv2.flip(frame, 1)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = hands.process(rgb)
 
@@ -116,6 +144,8 @@ def main():
 
                     index_tip = lm[8]
                     st.index_y_hist.append(index_tip.y)
+
+                    st.index_pos_hist.append((index_tip.x, index_tip.y))
 
                     can_fire = (now - st.last_action_time) > COOLDOWN
 
@@ -160,6 +190,15 @@ def main():
                                 pyautogui.press('volumedown')
                                 gesture_label = "Volume Down"
                             st.last_action_time = now
+
+                    # Circular index motion => Scroll
+                    if gesture_label == "None" and is_pointing_up(up) and can_fire:
+                        direction = circular_motion(st.index_pos_hist)
+                        if direction != 0:
+                            pyautogui.scroll(direction * SCROLL_SENSITIVITY)
+                            gesture_label = "Scroll " + ("Up" if direction > 0 else "Down")
+                            st.last_action_time = now
+                            st.index_pos_hist.clear()
 
                     # Left hand open palm => Mute
                     if gesture_label == "None" and label == "Left" and is_open_palm(up) and can_fire:
