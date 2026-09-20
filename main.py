@@ -5,6 +5,7 @@ import mediapipe as mp
 import time
 import collections
 import pyautogui
+import math
 
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
@@ -20,13 +21,26 @@ COOLDOWN = 1.2
 SWIPE_THRESH = 0.35
 SWIPE_FRAMES = 10
 
+VOL_MOVE_THRESH = 0.04
+OK_DIST_THRESH = 0.05
+
 class HandState:
     def __init__(self):
         self.wrist_x_hist = collections.deque(maxlen=SWIPE_FRAMES)
+        self.index_y_hist = collections.deque(maxlen=5)
         self.last_action_time = 0.0
 
 def is_open_palm(up):
     return sum(up) >= 4
+
+def dist(a, b):
+    return math.hypot(a.x - b.x, a.y - b.y)
+
+def is_ok_sign(lm):
+    return dist(lm[4], lm[8]) < OK_DIST_THRESH
+
+def is_pointing_up(up):
+    return up[1] and not any(up[2:])
 
 def draw_hud(frame, gesture, finger_count):
     cv2.rectangle(frame, (0, 0), (260, 70), (20, 20, 20), -1)
@@ -81,6 +95,9 @@ def main():
                     wrist = lm[0]
                     st.wrist_x_hist.append(wrist.x)
 
+                    index_tip = lm[8]
+                    st.index_y_hist.append(index_tip.y)
+
                     can_fire = (now - st.last_action_time) > COOLDOWN
 
                     # Raise 1-5 fingers => switch to tab N
@@ -98,6 +115,31 @@ def main():
                             gesture_label = "Swipe " + ("Right" if dx > 0 else "Left")
                             st.last_action_time = now
                             st.wrist_x_hist.clear()
+
+                    # OK sign -> Play/Pause
+                    if gesture_label == "None" and is_ok_sign(lm) and can_fire:
+                        pyautogui.press('space')
+                        gesture_label = "Play/Pause"
+                        st.last_action_time = now
+
+                    # Left hand open palm -> Mute
+                    if gesture_label == "None" and label == "Left" and is_open_palm(up) and can_fire:
+                        pyautogui.press('volumemute')
+                        gesture_label = "Mute Toggle"
+                        st.last_action_time = now
+
+                    # Pointing finger vertical move -> Volume up/down
+                    if (gesture_label == "None" and is_pointing_up(up)
+                            and len(st.index_y_hist) == st.index_y_hist.maxlen and can_fire):
+                        dy = st.index_y_hist[0] - st.index_y_hist[-1]
+                        if abs(dy) > VOL_MOVE_THRESH:
+                            if dy > 0:
+                                pyautogui.press('volumeup')
+                                gesture_label = "Volume Up"
+                            else:
+                                pyautogui.press('volumedown')
+                                gesture_label = "Volume Down"
+                            st.last_action_time = now
 
             draw_hud(frame, gesture_label, finger_count)
             cv2.imshow("Gesture PC Control", frame)
